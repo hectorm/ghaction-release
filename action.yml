@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+name: "Publish GitHub release"
+description: "Publish GitHub release"
+inputs:
+  release-name:
+    description: "Release name"
+    required: true
+    default: "${{ github.ref_name }}"
+  tag-name:
+    description: "Tag name"
+    required: true
+    default: "${{ github.ref_name }}"
+  prerelease:
+    description: "Prerelease"
+    required: false
+    default: "false"
+  draft:
+    description: "Draft"
+    required: false
+    default: "false"
+  generate-release-notes:
+    description: "Generate release notes"
+    required: false
+    default: "true"
+  assets-path:
+    description: "Assets path"
+    required: false
+runs:
+  using: "composite"
+  steps:
+    - shell: "bash"
+      env:
+        RELEASE_NAME: "${{ inputs.release-name }}"
+        TAG_NAME: "${{ inputs.tag-name }}"
+        PRERELEASE: "${{ inputs.prerelease }}"
+        DRAFT: "${{ inputs.draft }}"
+        GENERATE_RELEASE_NOTES: "${{ inputs.generate-release-notes }}"
+        ASSETS_PATH: "${{ inputs.assets-path }}"
+        GITHUB_TOKEN: "${{ github.token }}"
+      run: |
+        RELEASE_STATUS="$(curl -fs --proto '=https' --tlsv1.3 --globoff \
+          --url "https://api.github.com/repos/${GITHUB_REPOSITORY:?}/releases/tags/${GITHUB_REF_NAME:?}" \
+          --header "Authorization: Bearer ${GITHUB_TOKEN:?}" \
+          --header 'Accept: application/vnd.github.v3+json' \
+          --header 'Content-Type: application/json' \
+          --write-out '%{http_code}' --output /dev/null ||:)"
+        if [ "${RELEASE_STATUS:?}" = '200' ]; then exit 0; fi
+
+        RELEASE_ID="$(curl -fsS --proto '=https' --tlsv1.3 --globoff \
+          --url "https://api.github.com/repos/${GITHUB_REPOSITORY:?}/releases" \
+          --header "Authorization: Bearer ${GITHUB_TOKEN:?}" \
+          --header 'Accept: application/vnd.github.v3+json' \
+          --header 'Content-Type: application/json' \
+          --data "$(jq -nc \
+            --arg name "${RELEASE_NAME:?}" \
+            --arg tag_name "${TAG_NAME:?}" \
+            --argjson prerelease "${PRERELEASE:?}" \
+            --argjson draft "${DRAFT:?}" \
+            --argjson generate_release_notes "${GENERATE_RELEASE_NOTES:?}" '{
+              "name": $name,
+              "tag_name": $tag_name,
+              "prerelease": $prerelease,
+              "draft": $draft,
+              "generate_release_notes": $generate_release_notes
+            }')" | jq -r '.id')"
+        if [ -z "${RELEASE_ID-}" ] || [ "${RELEASE_ID:?}" = 'null' ]; then exit 1; fi
+
+        if [ -n "${ASSETS_PATH-}" ]; then
+          for asset in "${ASSETS_PATH:?}"/*; do
+            [ -f "${asset:?}" ] || continue
+            encodedAssetName="$(jq -nr --arg v "$(basename "${asset:?}")" '$v|@uri')"
+            curl -fsS --proto '=https' --tlsv1.3 --globoff \
+              --url "https://uploads.github.com/repos/${GITHUB_REPOSITORY:?}/releases/${RELEASE_ID:?}/assets?name=${encodedAssetName:?})" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN:?}" \
+              --header 'Accept: application/vnd.github.v3+json' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@${asset:?}" --output /dev/null
+          done
+        fi
